@@ -1,0 +1,35 @@
+{
+  "name": "reforger-server-tui",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": "dist/index.js",
+  "scripts": {
+    "dev": "tsx src/index.tsx",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "bundle:sea": "node scripts/bundle-sea.mjs",
+    "build:sea": "npm run bundle:sea && node scripts/build-sea.mjs"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "Terminal UI to manage Arma Reforger server presets",
+  "dependencies": {
+    "execa": "^9.6.1",
+    "ink": "^6.8.0",
+    "ink-select-input": "^6.2.0",
+    "ink-spinner": "^5.0.0",
+    "ink-text-input": "^6.0.0",
+    "react": "^19.2.5",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.2",
+    "@types/react": "^19.2.14",
+    "esbuild": "^0.28.0",
+    "postject": "^1.0.0-alpha.6",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.2"
+  }
+}

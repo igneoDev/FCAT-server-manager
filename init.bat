@@ -1,0 +1,1 @@
+.\ArmaReforgerServer.exe -config "D:\SteamLibrary\steamapps\common\Arma Reforger Server\server.json" -loadSessionSave

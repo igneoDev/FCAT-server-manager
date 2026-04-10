@@ -1,0 +1,19 @@
+app/node_modules/
+addons/
+app/node_modules/
+app/dist/
+app/.sea/
+app/.bundle/
+app/logs/
+app/app.mjs
+app/ReforgerServerManager.exe
+app/ReforgerServerManager-sea.exe
+battleye/
+licenses/
+Arma Reforger Server.rar
+ArmaReforgerServer.exe
+ArmaReforgerServerDiag.exe
+CrashReporter.exe
+steam_api64.dll
+steam_appid.txt
+Readme.txt

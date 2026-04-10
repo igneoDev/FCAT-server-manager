@@ -1,0 +1,35 @@
+{
+  "bindAddress": "0.0.0.0",
+  "bindPort": 2001,
+  "publicAddress": "0.0.0.0",
+  "publicPort": 2001,
+  "a2s": {
+    "address": "0.0.0.0",
+    "port": 17777
+  },
+  "rcon": {
+    "address": "0.0.0.0",
+    "port": 19999,
+    "password": "",
+    "permission": "admin",
+    "blacklist": [],
+    "whitelist": [],
+    "maxClients": 16
+  },
+  "game": {
+    "name": "Novo Preset",
+    "password": "",
+    "passwordAdmin": "",
+    "admins": [],
+    "scenarioId": "",
+    "maxPlayers": 20,
+    "visible": true,
+    "crossPlatform": false,
+    "supportedPlatforms": [
+      "PLATFORM_PC"
+    ],
+    "gameProperties": {},
+    "mods": [],
+    "modsRequiredByDefault": true
+  }
+}
