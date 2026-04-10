@@ -55,6 +55,10 @@ export interface UpdateResult {
   note?: string;
 }
 
+export interface AppSettings {
+  serverRoot?: string;
+}
+
 export type ImportModsErrorStage = "direct-parse" | "wrapped-parse" | "schema-validate";
 
 export interface ImportModsDiagnostics {

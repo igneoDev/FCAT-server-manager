@@ -2,10 +2,9 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import {z} from "zod";
 import {ImportModsError, type ImportModsDiagnostics, type PresetFile, type ServerConfig, type ServerMod} from "../types.js";
-import {getAppRoot, getServerRoot} from "./paths.js";
+import {getAppRoot} from "./paths.js";
 
 const appRoot = getAppRoot();
-export const serverRoot = getServerRoot();
 const baseConfigPath = path.resolve(appRoot, "data", "base.json");
 
 const modSchema = z.object({
@@ -25,7 +24,7 @@ function isPresetFileName(fileName: string): boolean {
     return false;
   }
 
-  return !["package.json", "package-lock.json"].includes(fileName);
+  return !["package.json", "package-lock.json", "server.json"].includes(fileName);
 }
 
 export async function loadBaseConfig(): Promise<ServerConfig> {
@@ -33,7 +32,7 @@ export async function loadBaseConfig(): Promise<ServerConfig> {
   return serverConfigSchema.parse(JSON.parse(raw));
 }
 
-export async function listPresets(): Promise<PresetFile[]> {
+export async function listPresets(serverRoot: string): Promise<PresetFile[]> {
   const entries = await fs.readdir(serverRoot, {withFileTypes: true});
   const presets = entries
     .filter((entry) => entry.isFile() && isPresetFileName(entry.name))
@@ -55,13 +54,13 @@ export async function listPresets(): Promise<PresetFile[]> {
   return loaded;
 }
 
-export async function savePreset(fileName: string, config: ServerConfig): Promise<string> {
+export async function savePreset(serverRoot: string, fileName: string, config: ServerConfig): Promise<string> {
   const outputPath = path.resolve(serverRoot, `${fileName}.json`);
   await fs.writeFile(outputPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
   return outputPath;
 }
 
-export async function writeRuntimeConfig(config: ServerConfig): Promise<string> {
+export async function writeRuntimeConfig(serverRoot: string, config: ServerConfig): Promise<string> {
   const outputPath = path.resolve(serverRoot, "server.json");
   await fs.writeFile(outputPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
   return outputPath;

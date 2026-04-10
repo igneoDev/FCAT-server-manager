@@ -1,9 +1,8 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import {spawn} from "node:child_process";
-import {serverRoot} from "./config.js";
 
-export async function launchServer(configPath: string): Promise<void> {
+export async function launchServer(serverRoot: string, configPath: string): Promise<void> {
   const executablePath = path.resolve(serverRoot, "ArmaReforgerServer.exe");
   await fs.access(executablePath);
 

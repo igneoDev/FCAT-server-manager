@@ -15,15 +15,18 @@ import {
 } from "./lib/config.js";
 import {appendImportLog} from "./lib/logger.js";
 import {detectExternalIp} from "./lib/network.js";
+import {resolveServerRoot} from "./lib/paths.js";
 import {launchServer} from "./lib/server.js";
+import {getSettingsPath, loadSettings, saveSettings} from "./lib/settings.js";
 import {checkModsAgainstImportedList, checkModsAgainstWorkshop} from "./lib/workshop.js";
-import {ImportModsError, type PresetFile, type ServerConfig, type ServerMod, type UpdateResult} from "./types.js";
+import {ImportModsError, type AppSettings, type PresetFile, type ServerConfig, type ServerMod, type UpdateResult} from "./types.js";
 
 type Step =
   | "loading"
   | "select-preset"
   | "create-preset-name"
   | "create-preset-base"
+  | "configure-server-root"
   | "review"
   | "server-name"
   | "ip-choice"
@@ -44,7 +47,9 @@ type Step =
 interface AppState {
   step: Step;
   presets: PresetFile[];
+  serverRoot?: string;
   baseConfig?: ServerConfig;
+  settings: AppSettings;
   selectedPresetName?: string;
   currentConfig?: ServerConfig;
   draftPresetName: string;
@@ -52,6 +57,7 @@ interface AppState {
   importedMods?: ServerMod[];
   updateResults: UpdateResult[];
   runtimeConfigPath?: string;
+  settingsPath?: string;
   doneMessage?: string;
   canReturnToReview?: boolean;
   errorMessage?: string;
@@ -63,6 +69,7 @@ function App() {
   const [state, setState] = useState<AppState>({
     step: "loading",
     presets: [],
+    settings: {},
     draftPresetName: "",
     updateResults: []
   });
@@ -72,14 +79,20 @@ function App() {
   useEffect(() => {
     void (async () => {
       try {
-        const [presets, baseConfig] = await Promise.all([listPresets(), loadBaseConfig()]);
+        const [settings, baseConfig] = await Promise.all([loadSettings(), loadBaseConfig()]);
+        const settingsPath = getSettingsPath();
+        const serverRoot = await resolveServerRoot(settings.serverRoot).catch(() => undefined);
+        const presets = serverRoot ? await listPresets(serverRoot) : [];
         const detectedIp = await detectExternalIp().catch(() => undefined);
 
         setState((current) => ({
           ...current,
-          step: "select-preset",
+          step: serverRoot ? "select-preset" : "configure-server-root",
           presets,
+          serverRoot,
           baseConfig,
+          settings,
+          settingsPath,
           detectedIp
         }));
       } catch (error) {
@@ -154,7 +167,11 @@ function App() {
   }
 
   async function persistAndWriteRuntimeConfig(config: ServerConfig): Promise<string> {
-    const runtimeConfigPath = await writeRuntimeConfig(config);
+    if (!state.serverRoot) {
+      throw new Error("Pasta do servidor nao configurada.");
+    }
+
+    const runtimeConfigPath = await writeRuntimeConfig(state.serverRoot, config);
     setState((current) => ({
       ...current,
       runtimeConfigPath
@@ -191,10 +208,55 @@ function App() {
     );
   }
 
+  if (state.step === "configure-server-root") {
+    return (
+      <Frame title="Pasta do Servidor">
+        <Text>O app nao encontrou automaticamente o `ArmaReforgerServer.exe`.</Text>
+        <Text>Digite a pasta onde esse executavel esta instalado.</Text>
+        <SummaryLine label="settings.json" value={state.settingsPath ?? "nao definido"} />
+        <Box marginTop={1}>
+          <Text color="cyan">Pasta: </Text>
+          <TextInput
+            value={textValue}
+            onChange={setTextValue}
+            onSubmit={(value) => {
+              void (async () => {
+                try {
+                  const manualRoot = value.trim();
+                  if (!manualRoot) {
+                    throw new Error("Pasta do servidor invalida.");
+                  }
+
+                  const serverRoot = await resolveServerRoot(manualRoot);
+                  const settings = {...state.settings, serverRoot};
+                  await saveSettings(settings);
+                  const presets = await listPresets(serverRoot);
+
+                  setState((current) => ({
+                    ...current,
+                    step: "select-preset",
+                    serverRoot,
+                    settings,
+                    presets
+                  }));
+                  setTextValue("");
+                } catch (error) {
+                  setError(error);
+                }
+              })();
+            }}
+          />
+        </Box>
+        <Footer />
+      </Frame>
+    );
+  }
+
   if (state.step === "select-preset") {
     return (
       <Frame title="Preset">
         <SummaryLine label="IP externo detectado" value={state.detectedIp ?? "nao disponivel"} />
+        <SummaryLine label="Pasta do servidor" value={state.serverRoot ?? "nao encontrada"} />
         <Text>Escolha um preset existente ou crie um novo.</Text>
         <SelectInput
           items={presetItems}
@@ -351,7 +413,10 @@ function App() {
                   try {
                     const mergedConfig = materializeConfig(state.baseConfig, currentConfig);
                     const runtimeConfigPath = await persistAndWriteRuntimeConfig(mergedConfig);
-                    await launchServer(runtimeConfigPath);
+                    if (!state.serverRoot) {
+                      throw new Error("Pasta do servidor nao configurada.");
+                    }
+                    await launchServer(state.serverRoot, runtimeConfigPath);
                     setState((current) => ({
                       ...current,
                       runtimeConfigPath,
@@ -701,9 +766,12 @@ function App() {
             void (async () => {
               try {
                 const mergedConfig = materializeConfig(state.baseConfig, currentConfig);
-                await savePreset(state.selectedPresetName ?? "preset", mergedConfig);
+                if (!state.serverRoot) {
+                  throw new Error("Pasta do servidor nao configurada.");
+                }
+                await savePreset(state.serverRoot, state.selectedPresetName ?? "preset", mergedConfig);
                 await persistAndWriteRuntimeConfig(mergedConfig);
-                const presets = await listPresets();
+                const presets = await listPresets(state.serverRoot);
                 setState((current) => ({
                   ...current,
                   presets,
@@ -752,7 +820,11 @@ function App() {
                   throw new Error("server.json ainda nao foi gerado.");
                 }
 
-                await launchServer(state.runtimeConfigPath);
+                if (!state.serverRoot) {
+                  throw new Error("Pasta do servidor nao configurada.");
+                }
+
+                await launchServer(state.serverRoot, state.runtimeConfigPath);
                 setState((current) => ({
                   ...current,
                   step: "done",
