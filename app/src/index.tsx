@@ -13,7 +13,10 @@ import {
   listPresetBackups,
   loadBaseConfig,
   parseImportedMods,
+  removeServerMod,
   savePreset,
+  sortServerMods,
+  upsertServerMod,
   writeRuntimeConfig
 } from "./lib/config.js";
 import {appendImportLog} from "./lib/logger.js";
@@ -21,7 +24,7 @@ import {detectExternalIp} from "./lib/network.js";
 import {resolveServerRoot} from "./lib/paths.js";
 import {getServerProcessInfo, isTrackedServerRunning, launchServer, stopServerProcess} from "./lib/server.js";
 import {getSettingsPath, loadSettings, saveSettings} from "./lib/settings.js";
-import {checkModsAgainstImportedList, checkModsAgainstWorkshop} from "./lib/workshop.js";
+import {checkModsAgainstImportedList, checkModsAgainstWorkshop, fetchWorkshopModById} from "./lib/workshop.js";
 import {ImportModsError, type AppSettings, type PresetBackup, type PresetFile, type ServerConfig, type ServerMod, type UpdateResult} from "./types.js";
 
 type Step =
@@ -38,6 +41,12 @@ type Step =
   | "scenario"
   | "mods-decision"
   | "mods-paste"
+  | "mod-remove-filter"
+  | "mod-remove-select"
+  | "mod-add-id"
+  | "mod-add-fetching"
+  | "mod-add-name"
+  | "mod-add-version"
   | "mods-import-error"
   | "mods-check"
   | "mods-check-running"
@@ -62,6 +71,8 @@ interface AppState {
   serverRunning?: boolean;
   serverPid?: number;
   importedMods?: ServerMod[];
+  modRemoveFilter: string;
+  draftMod: ServerMod;
   updateResults: UpdateResult[];
   runtimeConfigPath?: string;
   settingsPath?: string;
@@ -75,6 +86,7 @@ interface MenuItem {
   label: string;
   value: string;
   tone?: "warning";
+  group?: "server" | "config" | "mods";
 }
 
 function App() {
@@ -84,6 +96,8 @@ function App() {
     presets: [],
     settings: {},
     draftPresetName: "",
+    modRemoveFilter: "",
+    draftMod: {modId: "", name: "", version: ""},
     updateResults: []
   });
   const [textValue, setTextValue] = useState("");
@@ -119,9 +133,95 @@ function App() {
     })();
   }, []);
 
+  useEffect(() => {
+    if (state.step !== "mod-add-fetching") {
+      return;
+    }
+
+    void (async () => {
+      try {
+        const mod = await fetchWorkshopModById(state.draftMod.modId);
+
+        if (mod) {
+          updateConfig((config) => {
+            config.game.mods = upsertServerMod(config.game.mods, mod);
+          });
+          setState((current) => ({
+            ...current,
+            step: "done",
+            doneMessage: `Mod ${mod.name} adicionado automaticamente a partir do workshop.`,
+            canReturnToReview: true,
+            draftMod: {modId: "", name: "", version: ""}
+          }));
+          return;
+        }
+
+        setState((current) => ({
+          ...current,
+          step: "mod-add-name"
+        }));
+      } catch {
+        setState((current) => ({
+          ...current,
+          step: "mod-add-name"
+        }));
+      }
+    })();
+  }, [state.step, state.draftMod.modId]);
+
   useInput((input, key) => {
     if (key.escape) {
       exit();
+    }
+
+    if (key.ctrl && input.toLowerCase() === "p" && state.currentConfig) {
+      setState((current) => ({
+        ...current,
+        step: "select-preset",
+        selectedPresetName: undefined,
+        currentConfig: undefined,
+        presetBackups: undefined,
+        importedMods: undefined,
+        updateResults: [],
+        runtimeConfigPath: undefined,
+        doneMessage: undefined,
+        canReturnToReview: false
+      }));
+      return;
+    }
+
+    if (key.ctrl && input.toLowerCase() === "r" && state.currentConfig && state.step !== "review") {
+      setState((current) => ({
+        ...current,
+        step: "review",
+        doneMessage: undefined,
+        canReturnToReview: false,
+        importError: undefined
+      }));
+      return;
+    }
+
+    if (key.ctrl && input.toLowerCase() === "x" && state.serverRunning) {
+      setState((current) => ({...current, step: "launching"}));
+
+      void (async () => {
+        try {
+          const stopped = await stopServerProcess();
+          setState((current) => ({
+            ...current,
+            step: "done",
+            doneMessage: stopped
+              ? `Servidor ${getPresetLabel(state.selectedPresetName)} encerrado.`
+              : "Nao existe um servidor iniciado por este app em execucao.",
+            canReturnToReview: true,
+            serverRunning: false,
+            serverPid: undefined
+          }));
+        } catch (error) {
+          setError(error);
+        }
+      })();
+      return;
     }
 
     if (state.step === "done" && key.return) {
@@ -152,25 +252,17 @@ function App() {
   const reviewMenuItems = useMemo<MenuItem[]>(() => {
     const items: MenuItem[] = [];
 
-    if (state.serverRunning) {
-      items.push({
-        label: "Encerrar servidor iniciado pelo app",
-        value: "stop-server",
-        tone: "warning"
-      });
-    }
-
     items.push(
-      {label: "Salvar preset e iniciar servidor agora", value: "start-now"},
-      {label: "Editar nome do servidor", value: "server-name"},
-      {label: "Editar IP publico", value: "ip"},
-      {label: "Editar missao (scenarioId)", value: "scenario"},
-      {label: "Importar mods do Reforger", value: "mods"},
-      {label: "Restaurar backup do preset", value: "backup"},
-      {label: "Verificar atualizacao dos mods", value: "check"},
-      {label: "Salvar preset", value: "save"},
-      {label: "Iniciar servidor com preset atual sem salvar (teste)", value: "runtime"},
-      {label: "Voltar para a lista de presets", value: "preset-list"}
+      {label: "Iniciar servidor agora", value: "start-now", group: "server"},
+      {label: "Salvar preset", value: "save", group: "config"},
+      {label: "Editar nome do servidor", value: "server-name", group: "config"},
+      {label: "Editar IP publico", value: "ip", group: "config"},
+      {label: "Editar missao (scenarioId)", value: "scenario", group: "config"},
+      {label: "Importar mods do Reforger", value: "mods", group: "mods"},
+      {label: "Adicionar um mod manualmente", value: "mod-add", group: "mods"},
+      {label: "Remover um mod da lista atual", value: "mod-remove", group: "mods"},
+      {label: "Verificar atualizacao dos mods", value: "check", group: "mods"},
+      {label: "Restaurar backup do preset", value: "backup", group: "mods"}
     );
 
     return items;
@@ -433,9 +525,8 @@ function App() {
       <Frame title="Resumo">
         <Box marginTop={1} flexDirection="column">
           <Text>O que voce quer fazer agora?</Text>
-          <SelectInput
+          <ReviewActionMenu
             items={reviewMenuItems}
-            itemComponent={ReviewMenuItemComponent}
             onSelect={(item) => {
               if (item.value === "start-now") {
                 setState((current) => ({...current, step: "launching"}));
@@ -447,16 +538,13 @@ function App() {
                     }
 
                     const mergedConfig = materializeConfig(state.baseConfig, currentConfig);
-                    await savePreset(state.serverRoot, state.selectedPresetName ?? "preset", mergedConfig);
-                    const presets = await listPresets(state.serverRoot);
                     const runtimeConfigPath = await persistAndWriteRuntimeConfig(mergedConfig);
                     const processInfo = await launchServer(state.serverRoot, runtimeConfigPath);
                     setState((current) => ({
                       ...current,
-                      presets,
                       runtimeConfigPath,
                       step: "done",
-                      doneMessage: `Preset ${getPresetLabel(state.selectedPresetName)} salvo e servidor iniciado.`,
+                      doneMessage: `Servidor ${getPresetLabel(state.selectedPresetName)} iniciado.`,
                       canReturnToReview: true,
                       serverRunning: true,
                       serverPid: processInfo.pid
@@ -469,25 +557,6 @@ function App() {
               }
 
               if (item.value === "stop-server") {
-                setState((current) => ({...current, step: "launching"}));
-
-                void (async () => {
-                  try {
-                    const stopped = await stopServerProcess();
-                    setState((current) => ({
-                      ...current,
-                      step: "done",
-                      doneMessage: stopped
-                        ? `Servidor ${getPresetLabel(state.selectedPresetName)} encerrado.`
-                        : "Nao existe um servidor iniciado por este app em execucao.",
-                      canReturnToReview: true,
-                      serverRunning: false,
-                      serverPid: undefined
-                    }));
-                  } catch (error) {
-                    setError(error);
-                  }
-                })();
                 return;
               }
 
@@ -510,6 +579,26 @@ function App() {
 
               if (item.value === "mods") {
                 setState((current) => ({...current, step: "mods-decision"}));
+                return;
+              }
+
+              if (item.value === "mod-add") {
+                setTextValue("");
+                setState((current) => ({
+                  ...current,
+                  step: "mod-add-id",
+                  draftMod: {modId: "", name: "", version: ""}
+                }));
+                return;
+              }
+
+              if (item.value === "mod-remove") {
+                setTextValue("");
+                setState((current) => ({
+                  ...current,
+                  step: "mod-remove-filter",
+                  modRemoveFilter: ""
+                }));
                 return;
               }
 
@@ -542,45 +631,6 @@ function App() {
                 setState((current) => ({...current, step: "save-preset"}));
                 return;
               }
-
-              if (item.value === "preset-list") {
-                setState((current) => ({
-                  ...current,
-                  step: "select-preset",
-                  selectedPresetName: undefined,
-                  currentConfig: undefined,
-                  presetBackups: undefined,
-                  importedMods: undefined,
-                  updateResults: [],
-                  runtimeConfigPath: undefined,
-                  doneMessage: undefined,
-                  canReturnToReview: false
-                }));
-                return;
-              }
-
-              void (async () => {
-                try {
-                  if (!state.serverRoot) {
-                    throw new Error("Pasta do servidor nao configurada.");
-                  }
-
-                  const mergedConfig = materializeConfig(state.baseConfig, currentConfig);
-                  const runtimeConfigPath = await persistAndWriteRuntimeConfig(mergedConfig);
-                  const processInfo = await launchServer(state.serverRoot, runtimeConfigPath);
-                  setState((current) => ({
-                    ...current,
-                    runtimeConfigPath,
-                    step: "done",
-                    doneMessage: `Servidor ${getPresetLabel(state.selectedPresetName)} iniciado sem salvar o preset.`,
-                    canReturnToReview: true,
-                    serverRunning: true,
-                    serverPid: processInfo.pid
-                  }));
-                } catch (error) {
-                  setError(error);
-                }
-              })();
             }}
           />
         </Box>
@@ -708,10 +758,12 @@ function App() {
     return (
       <Frame title="Mods">
         <SummaryLine label="Mods atuais" value={String(currentConfig.game.mods.length)} />
-        <Text>Ao importar uma nova lista, os mods atuais deste preset serao substituidos.</Text>
+        <Text>Escolha como deseja alterar a lista de mods deste preset.</Text>
         <SelectInput
           items={[
-            {label: "Colar nova lista de mods", value: "paste"},
+            {label: "Importar lista completa do Reforger", value: "paste"},
+            {label: "Adicionar um mod manualmente", value: "add"},
+            {label: "Remover um mod da lista atual", value: "remove"},
             {label: "Voltar sem alterar", value: "back"}
           ]}
           onSelect={(item) => {
@@ -720,10 +772,210 @@ function App() {
               return;
             }
 
+            if (item.value === "add") {
+              setTextValue("");
+              setState((current) => ({
+                ...current,
+                step: "mod-add-id",
+                draftMod: {modId: "", name: "", version: ""}
+              }));
+              return;
+            }
+
+            if (item.value === "remove") {
+              setState((current) => ({...current, step: "mod-remove-select"}));
+              return;
+            }
+
             setPasteValue("");
             setState((current) => ({...current, step: "mods-paste"}));
           }}
         />
+        <Footer />
+      </Frame>
+    );
+  }
+
+  if (state.step === "mod-remove-select") {
+    const filter = state.modRemoveFilter.trim().toLowerCase();
+    const filteredMods = currentConfig.game.mods.filter((mod) => {
+      if (!filter) {
+        return true;
+      }
+
+      return (
+        mod.name.toLowerCase().includes(filter) ||
+        mod.modId.toLowerCase().includes(filter)
+      );
+    });
+
+    const modItems = [
+      ...filteredMods.map((mod) => ({
+        label: `${mod.name} (${mod.version})`,
+        value: mod.modId
+      })),
+      {label: "Voltar", value: "__back__"}
+    ];
+
+    return (
+      <Frame title="Remover Mod">
+        <SummaryLine
+          label="Filtro"
+          value={state.modRemoveFilter || "sem filtro"}
+        />
+        <SummaryLine
+          label="Resultados"
+          value={`${filteredMods.length} de ${currentConfig.game.mods.length}`}
+        />
+        <Text>Escolha o mod que deseja remover da lista atual.</Text>
+        <SelectInput
+          items={modItems}
+          limit={18}
+          onSelect={(item) => {
+            if (item.value === "__back__") {
+              setState((current) => ({...current, step: "mod-remove-filter"}));
+              return;
+            }
+
+            updateConfig((config) => {
+              config.game.mods = removeServerMod(config.game.mods, item.value);
+            });
+            setState((current) => ({
+              ...current,
+              step: "done",
+              doneMessage: `Mod removido com sucesso do preset ${getPresetLabel(state.selectedPresetName)}.`,
+              canReturnToReview: true,
+              modRemoveFilter: ""
+            }));
+          }}
+        />
+        <Footer />
+      </Frame>
+    );
+  }
+
+  if (state.step === "mod-remove-filter") {
+    return (
+      <Frame title="Remover Mod">
+        <Text>Digite parte do nome ou o `modId` do mod que deseja encontrar.</Text>
+        <Text dimColor>Deixe vazio para listar todos os mods.</Text>
+        <Box marginTop={1}>
+          <Text color="cyan">Filtro: </Text>
+          <TextInput
+            value={textValue}
+            onChange={setTextValue}
+            onSubmit={(value) => {
+              setState((current) => ({
+                ...current,
+                step: "mod-remove-select",
+                modRemoveFilter: value.trim()
+              }));
+              setTextValue("");
+            }}
+          />
+        </Box>
+        <Footer />
+      </Frame>
+    );
+  }
+
+  if (state.step === "mod-add-id") {
+    return (
+      <Frame title="Adicionar Mod">
+        <Text>Digite o `modId` do mod.</Text>
+        <Box marginTop={1}>
+          <Text color="cyan">modId: </Text>
+          <TextInput
+            value={textValue}
+            onChange={setTextValue}
+            onSubmit={(value) => {
+              const modId = value.trim();
+              if (!modId) {
+                setError(new Error("modId invalido."));
+                return;
+              }
+
+              setState((current) => ({
+                ...current,
+                step: "mod-add-fetching",
+                draftMod: {...current.draftMod, modId}
+              }));
+              setTextValue("");
+            }}
+          />
+        </Box>
+        <Footer />
+      </Frame>
+    );
+  }
+
+  if (state.step === "mod-add-fetching") {
+    return <LoadingScreen label={`Buscando mod ${state.draftMod.modId} no workshop`} />;
+  }
+
+  if (state.step === "mod-add-name") {
+    return (
+      <Frame title="Adicionar Mod">
+        <Text>Nao foi possivel preencher automaticamente. Digite o nome do mod.</Text>
+        <Box marginTop={1}>
+          <Text color="cyan">Nome: </Text>
+          <TextInput
+            value={textValue}
+            onChange={setTextValue}
+            onSubmit={(value) => {
+              const name = value.trim();
+              if (!name) {
+                setError(new Error("Nome do mod invalido."));
+                return;
+              }
+
+              setState((current) => ({
+                ...current,
+                step: "mod-add-version",
+                draftMod: {...current.draftMod, name}
+              }));
+              setTextValue("");
+            }}
+          />
+        </Box>
+        <Footer />
+      </Frame>
+    );
+  }
+
+  if (state.step === "mod-add-version") {
+    return (
+      <Frame title="Adicionar Mod">
+        <Text>Digite a versao do mod.</Text>
+        <Box marginTop={1}>
+          <Text color="cyan">Versao: </Text>
+          <TextInput
+            value={textValue}
+            onChange={setTextValue}
+            onSubmit={(value) => {
+              const version = value.trim();
+              if (!version) {
+                setError(new Error("Versao do mod invalida."));
+                return;
+              }
+
+              try {
+                const modToAdd = {...state.draftMod, version};
+                updateConfig((config) => {
+                  config.game.mods = upsertServerMod(config.game.mods, modToAdd);
+                });
+                setState((current) => ({
+                  ...current,
+                  step: "review",
+                  draftMod: {modId: "", name: "", version: ""}
+                }));
+                setTextValue("");
+              } catch (error) {
+                setError(error);
+              }
+            }}
+          />
+        </Box>
         <Footer />
       </Frame>
     );
@@ -929,13 +1181,13 @@ function App() {
                   throw new Error("Pasta do servidor nao configurada.");
                 }
                 await savePreset(state.serverRoot, state.selectedPresetName ?? "preset", mergedConfig);
+                const runtimeConfigPath = await persistAndWriteRuntimeConfig(mergedConfig);
                 const presets = await listPresets(state.serverRoot);
                 setState((current) => ({
                   ...current,
                   presets,
-                  step: "done",
-                  doneMessage: `Preset ${getPresetLabel(state.selectedPresetName)} salvo com sucesso.`,
-                  canReturnToReview: true
+                  runtimeConfigPath,
+                  step: "launch"
                 }));
               } catch (error) {
                 setError(error);
@@ -954,19 +1206,20 @@ function App() {
 
   if (state.step === "launch") {
     return (
-      <Frame title="Servidor Pronto">
+      <Frame title="Preset Salvo">
+        <Text>O preset foi salvo e a configuracao do servidor foi atualizada.</Text>
         <SummaryLine label="Arquivo gerado" value={state.runtimeConfigPath ?? "nao gerado"} />
         <SelectInput
           items={[
-            {label: "Iniciar servidor agora", value: "launch"},
-            {label: "Voltar sem iniciar", value: "finish"}
+            {label: "Abrir servidor agora", value: "launch"},
+            {label: "Voltar sem abrir", value: "finish"}
           ]}
           onSelect={(item) => {
             if (item.value === "finish") {
               setState((current) => ({
                 ...current,
                 step: "done",
-                doneMessage: `Configuracao do servidor gerada para o preset ${getPresetLabel(state.selectedPresetName)}.`,
+                doneMessage: `Preset ${getPresetLabel(state.selectedPresetName)} salvo com sucesso.`,
                 canReturnToReview: true
               }));
               return;
@@ -1083,6 +1336,7 @@ let sharedHeaderState: Partial<AppState> = {};
 
 function Frame(props: {title: string; children: React.ReactNode}) {
   const summaryLines = getHeaderSummary(sharedHeaderState);
+  const globalActions = getGlobalActions(sharedHeaderState);
 
   return (
     <Box flexDirection="column" borderStyle="round" borderColor="cyan" padding={1}>
@@ -1095,6 +1349,18 @@ function Frame(props: {title: string; children: React.ReactNode}) {
               {line}
             </Text>
           ))}
+        </Box>
+      ) : null}
+      {globalActions.length ? (
+        <Box marginTop={1}>
+          <Text>
+            {globalActions.map((action, index) => (
+              <Text key={action.label}>
+                {index > 0 ? "  " : ""}
+                <Text color={action.color}>{action.label}</Text>
+              </Text>
+            ))}
+          </Text>
         </Box>
       ) : null}
       <Box marginTop={1} flexDirection="column">
@@ -1126,15 +1392,103 @@ function SummaryLine(props: {label: string; value: string}) {
   );
 }
 
-function ReviewMenuItemComponent(props: {label: string; isSelected?: boolean}) {
-  const isWarning = props.label === "Encerrar servidor iniciado pelo app";
-  const color = isWarning ? "yellow" : props.isSelected ? "cyan" : undefined;
-
-  return <Text color={color}>{props.label}</Text>;
-}
-
 function Footer() {
   return <Text dimColor>Esc sai do app.</Text>;
+}
+
+function ReviewActionMenu(props: {
+  items: MenuItem[];
+  onSelect: (item: MenuItem) => void;
+}) {
+  const [selectedIndex, setSelectedIndex] = useState(0);
+
+  useEffect(() => {
+    setSelectedIndex((current) => {
+      if (props.items.length === 0) {
+        return 0;
+      }
+
+      return Math.min(current, props.items.length - 1);
+    });
+  }, [props.items]);
+
+  useInput((input, key) => {
+    if (key.upArrow || input === "k") {
+      setSelectedIndex((current) =>
+        current <= 0 ? props.items.length - 1 : current - 1
+      );
+      return;
+    }
+
+    if (key.downArrow || input === "j") {
+      setSelectedIndex((current) =>
+        current >= props.items.length - 1 ? 0 : current + 1
+      );
+      return;
+    }
+
+    if (/^[1-9]$/.test(input)) {
+      const targetIndex = Number.parseInt(input, 10) - 1;
+      if (targetIndex >= 0 && targetIndex < props.items.length) {
+        props.onSelect(props.items[targetIndex]);
+      }
+      return;
+    }
+
+    if (key.return && props.items[selectedIndex]) {
+      props.onSelect(props.items[selectedIndex]);
+    }
+  });
+
+  return (
+    <Box marginTop={1} flexDirection="column">
+      <ReviewActionGroup
+        title="[SERVIDOR]"
+        group="server"
+        items={props.items}
+        selectedIndex={selectedIndex}
+      />
+      <ReviewActionGroup
+        title="[CONFIGURACAO]"
+        group="config"
+        items={props.items}
+        selectedIndex={selectedIndex}
+      />
+      <ReviewActionGroup
+        title="[MODS]"
+        group="mods"
+        items={props.items}
+        selectedIndex={selectedIndex}
+      />
+    </Box>
+  );
+}
+
+function ReviewActionGroup(props: {
+  title: string;
+  group: NonNullable<MenuItem["group"]>;
+  items: MenuItem[];
+  selectedIndex: number;
+}) {
+  const groupedItems = props.items
+    .map((item, index) => ({item, index}))
+    .filter((entry) => entry.item.group === props.group);
+
+  if (groupedItems.length === 0) {
+    return null;
+  }
+
+  return (
+    <Box marginTop={1} flexDirection="column">
+      <Text color="magentaBright">{props.title}</Text>
+      {groupedItems.map(({item, index}) => (
+        <Text key={item.value} color={index === props.selectedIndex ? "cyan" : undefined}>
+          {index === props.selectedIndex ? "> " : "  "}
+          {item.label}
+        </Text>
+      ))}
+    </Box>
+  );
 }
 
 function PasteEditor(props: {
@@ -1216,10 +1570,25 @@ function getHeaderSummary(state: Partial<AppState>): string[] | null {
   const config = state.currentConfig;
 
   return [
-    `Preset: ${state.selectedPresetName ?? "sem nome"} | Status: ${state.serverRunning ? `rodando (PID ${state.serverPid ?? "?"})` : "parado"}`,
+    `Preset: ${state.selectedPresetName ?? "sem nome"} | Status: ${state.serverRunning ? `RODANDO (PID ${state.serverPid ?? "?"})` : "PARADO"}`,
     `Servidor: ${config.game.name ?? "sem nome"}`,
     `IP: ${config.publicAddress ?? "nao definido"} | Missao: ${config.game.scenarioId ?? "nao definida"} | Mods: ${config.game.mods.length}`
   ];
+}
+
+function getGlobalActions(state: Partial<AppState>): Array<{label: string; color?: string}> {
+  const actions: Array<{label: string; color?: string}> = [];
+
+  if (state.currentConfig) {
+    actions.push({label: "[Ctrl+P] Trocar preset", color: "cyan"});
+    actions.push({label: "[Ctrl+R] Voltar ao resumo", color: "cyan"});
+  }
+
+  if (state.serverRunning) {
+    actions.push({label: "[Ctrl+X] Encerrar servidor", color: "yellow"});
+  }
+
+  return actions;
 }
 
 render(<App />);

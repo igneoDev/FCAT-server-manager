@@ -8,6 +8,20 @@ export async function checkModsAgainstWorkshop(mods: ServerMod[]): Promise<Updat
   return results.sort((left, right) => Number(right.changed) - Number(left.changed));
 }
 
+export async function fetchWorkshopModById(modId: string): Promise<ServerMod | null> {
+  const lookup = await lookupWorkshopMod(modId);
+
+  if (!lookup) {
+    return null;
+  }
+
+  return {
+    modId,
+    name: lookup.name,
+    version: lookup.version
+  };
+}
+
 export function checkModsAgainstImportedList(currentMods: ServerMod[], importedMods: ServerMod[]): UpdateResult[] {
   const importedMap = new Map(importedMods.map((mod) => [mod.modId, mod]));
 
@@ -37,42 +51,52 @@ export function checkModsAgainstImportedList(currentMods: ServerMod[], importedM
 }
 
 async function lookupModVersion(mod: ServerMod): Promise<UpdateResult> {
-  const url = `${WORKSHOP_BASE_URL}/${mod.modId}`;
-
   try {
-    const response = await fetch(url, {
-      headers: {
-        "user-agent": "reforger-server-tui/1.0"
-      }
-    });
+    const lookup = await lookupWorkshopMod(mod.modId);
 
-    if (!response.ok) {
-      return unavailable(mod, `HTTP ${response.status}`);
-    }
-
-    const html = await response.text();
-    const facts = extractWorkshopFacts(html);
-    const remoteVersion = facts.get("Version");
-
-    if (!remoteVersion) {
+    if (!lookup) {
       return unavailable(mod, "Campo Version nao encontrado no workshop.");
     }
-
-    const lastModified = facts.get("Last Modified");
 
     return {
       modId: mod.modId,
       name: mod.name,
       currentVersion: mod.version,
-      remoteVersion,
-      changed: remoteVersion !== mod.version,
+      remoteVersion: lookup.version,
+      changed: lookup.version !== mod.version,
       source: "workshop",
-      note: lastModified ? `Last Modified: ${lastModified}` : undefined
+      note: lookup.lastModified ? `Last Modified: ${lookup.lastModified}` : undefined
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : "Erro desconhecido";
     return unavailable(mod, message);
   }
+}
+
+async function lookupWorkshopMod(modId: string): Promise<{name: string; version: string; lastModified?: string} | null> {
+  const url = `${WORKSHOP_BASE_URL}/${modId}`;
+  const response = await fetch(url, {
+    headers: {
+      "user-agent": "reforger-server-tui/1.0"
+    }
+  });
+
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`);
+  }
+
+  const html = await response.text();
+  const facts = extractWorkshopFacts(html);
+  const version = facts.get("Version");
+
+  if (!version) {
+    return null;
+  }
+
+  const name = extractWorkshopTitle(html) ?? modId;
+  const lastModified = facts.get("Last Modified");
+
+  return {name, version, lastModified};
 }
 
 function extractWorkshopFacts(html: string): Map<string, string> {
@@ -95,6 +119,11 @@ function extractWorkshopFacts(html: string): Map<string, string> {
   }
 
   return facts;
+}
+
+function extractWorkshopTitle(html: string): string | null {
+  const match = html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i);
+  return match?.[1] ? normalizeText(match[1]) : null;
 }
 
 function normalizeText(value: string): string {

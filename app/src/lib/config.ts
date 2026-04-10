@@ -179,7 +179,7 @@ export function parseImportedMods(rawInput: string): ServerMod[] {
 function validateImportedMods(input: unknown, diagnostics: Omit<ImportModsDiagnostics, "stage" | "userMessage" | "technicalMessage">): ServerMod[] {
   try {
     const mods = z.array(modSchema).parse(input);
-    return sortMods(mods);
+    return sortServerMods(mods);
   } catch (error) {
     if (error instanceof z.ZodError) {
       throw new ImportModsError({
@@ -195,7 +195,7 @@ function validateImportedMods(input: unknown, diagnostics: Omit<ImportModsDiagno
   }
 }
 
-function sortMods(mods: ServerMod[]): ServerMod[] {
+export function sortServerMods(mods: ServerMod[]): ServerMod[] {
   return [...mods].sort((left, right) => {
     const priorityDifference = getPriority(left.name) - getPriority(right.name);
 
@@ -205,6 +205,16 @@ function sortMods(mods: ServerMod[]): ServerMod[] {
 
     return left.name.localeCompare(right.name, undefined, {sensitivity: "base"});
   });
+}
+
+export function upsertServerMod(mods: ServerMod[], mod: ServerMod): ServerMod[] {
+  const normalizedMod = modSchema.parse(mod);
+  const filtered = mods.filter((entry) => entry.modId !== normalizedMod.modId);
+  return sortServerMods([...filtered, normalizedMod]);
+}
+
+export function removeServerMod(mods: ServerMod[], modId: string): ServerMod[] {
+  return mods.filter((entry) => entry.modId !== modId);
 }
 
 function getPriority(name: string): number {
