@@ -139,7 +139,8 @@ export function parseImportedMods(rawInput: string): ServerMod[] {
 
 function validateImportedMods(input: unknown, diagnostics: Omit<ImportModsDiagnostics, "stage" | "userMessage" | "technicalMessage">): ServerMod[] {
   try {
-    return z.array(modSchema).parse(input);
+    const mods = z.array(modSchema).parse(input);
+    return sortMods(mods);
   } catch (error) {
     if (error instanceof z.ZodError) {
       throw new ImportModsError({
@@ -153,6 +154,36 @@ function validateImportedMods(input: unknown, diagnostics: Omit<ImportModsDiagno
 
     throw error;
   }
+}
+
+function sortMods(mods: ServerMod[]): ServerMod[] {
+  return [...mods].sort((left, right) => {
+    const priorityDifference = getPriority(left.name) - getPriority(right.name);
+
+    if (priorityDifference !== 0) {
+      return priorityDifference;
+    }
+
+    return left.name.localeCompare(right.name, undefined, {sensitivity: "base"});
+  });
+}
+
+function getPriority(name: string): number {
+  const rules: Array<[RegExp, number]> = [
+    [/ACE /i, 0],
+    [/RHS/i, 1],
+    [/GRS/i, 4],
+    [/Tactical[\s_]?Flava/i, 5],
+    [/FCAT/i, 6]
+  ];
+
+  for (const [pattern, priority] of rules) {
+    if (pattern.test(name)) {
+      return priority;
+    }
+  }
+
+  return 3;
 }
 
 function tryParse(value: string): {ok: true; value: unknown} | {ok: false; errorMessage: string} {
