@@ -26,17 +26,34 @@ export async function launchServer(serverRoot: string, configPath: string): Prom
         detached: true,
         stdio: "ignore"
       })
-    : spawn("powershell.exe", [
-        "-NoExit",
-        "-Command",
-        `Set-Location '${escapeForPowershell(serverRoot)}'; & '${escapeForPowershell(executablePath)}' -config '${escapeForPowershell(configPath)}' -loadSessionSave`
-      ], {
+    : await launchWithCmdWindow(serverRoot, executablePath, configPath);
+
+  child.unref();
+}
+
+async function launchWithCmdWindow(serverRoot: string, executablePath: string, configPath: string) {
+  const launcherPath = path.resolve(serverRoot, "start-managed-server.cmd");
+  const launcherScript = [
+    "@echo off",
+    `cd /d "${serverRoot}"`,
+    `"${executablePath}" -config "${configPath}" -loadSessionSave`,
+    "echo.",
+    "echo O servidor foi encerrado. Pressione uma tecla para fechar esta janela.",
+    "pause >nul"
+  ].join("\r\n");
+
+  await fs.writeFile(launcherPath, `${launcherScript}\r\n`, "utf8");
+
+  return spawn("cmd.exe", [
+    "/d",
+    "/s",
+    "/c",
+    `start "Arma Reforger Server" /d "${serverRoot}" cmd.exe /k "${launcherPath}"`
+  ], {
         cwd: serverRoot,
         detached: true,
         stdio: "ignore"
       });
-
-  child.unref();
 }
 
 async function resolveWindowsTerminal(): Promise<string | null> {
