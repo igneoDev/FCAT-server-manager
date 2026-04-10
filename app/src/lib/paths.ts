@@ -13,6 +13,10 @@ export function getAppRoot(): string {
   return path.resolve(currentDir, "..", "..");
 }
 
+export function getRuntimeRoot(): string {
+  return path.resolve(getAppRoot(), "runtime");
+}
+
 export async function resolveServerRoot(preferredRoot?: string): Promise<string> {
   const candidates = [
     preferredRoot,

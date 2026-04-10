@@ -19,7 +19,7 @@ import {
 import {appendImportLog} from "./lib/logger.js";
 import {detectExternalIp} from "./lib/network.js";
 import {resolveServerRoot} from "./lib/paths.js";
-import {launchServer} from "./lib/server.js";
+import {getServerProcessInfo, isTrackedServerRunning, launchServer, stopServerProcess} from "./lib/server.js";
 import {getSettingsPath, loadSettings, saveSettings} from "./lib/settings.js";
 import {checkModsAgainstImportedList, checkModsAgainstWorkshop} from "./lib/workshop.js";
 import {ImportModsError, type AppSettings, type PresetBackup, type PresetFile, type ServerConfig, type ServerMod, type UpdateResult} from "./types.js";
@@ -59,6 +59,8 @@ interface AppState {
   presetBackups?: PresetBackup[];
   draftPresetName: string;
   detectedIp?: string;
+  serverRunning?: boolean;
+  serverPid?: number;
   importedMods?: ServerMod[];
   updateResults: UpdateResult[];
   runtimeConfigPath?: string;
@@ -67,6 +69,12 @@ interface AppState {
   canReturnToReview?: boolean;
   errorMessage?: string;
   importError?: ImportModsError;
+}
+
+interface MenuItem {
+  label: string;
+  value: string;
+  tone?: "warning";
 }
 
 function App() {
@@ -80,6 +88,7 @@ function App() {
   });
   const [textValue, setTextValue] = useState("");
   const [pasteValue, setPasteValue] = useState("");
+  sharedHeaderState = state;
 
   useEffect(() => {
     void (async () => {
@@ -89,6 +98,8 @@ function App() {
         const serverRoot = await resolveServerRoot(settings.serverRoot).catch(() => undefined);
         const presets = serverRoot ? await listPresets(serverRoot) : [];
         const detectedIp = await detectExternalIp().catch(() => undefined);
+        const serverRunning = await isTrackedServerRunning().catch(() => false);
+        const processInfo = await getServerProcessInfo().catch(() => null);
 
         setState((current) => ({
           ...current,
@@ -98,7 +109,9 @@ function App() {
           baseConfig,
           settings,
           settingsPath,
-          detectedIp
+          detectedIp,
+          serverRunning,
+          serverPid: processInfo?.pid
         }));
       } catch (error) {
         setError(error);
@@ -136,6 +149,32 @@ function App() {
     ],
     [state.presets]
   );
+  const reviewMenuItems = useMemo<MenuItem[]>(() => {
+    const items: MenuItem[] = [];
+
+    if (state.serverRunning) {
+      items.push({
+        label: "Encerrar servidor iniciado pelo app",
+        value: "stop-server",
+        tone: "warning"
+      });
+    }
+
+    items.push(
+      {label: "Salvar preset e iniciar servidor agora", value: "start-now"},
+      {label: "Editar nome do servidor", value: "server-name"},
+      {label: "Editar IP publico", value: "ip"},
+      {label: "Editar missao (scenarioId)", value: "scenario"},
+      {label: "Importar mods do Reforger", value: "mods"},
+      {label: "Restaurar backup do preset", value: "backup"},
+      {label: "Verificar atualizacao dos mods", value: "check"},
+      {label: "Salvar preset", value: "save"},
+      {label: "Iniciar servidor com preset atual sem salvar (teste)", value: "runtime"},
+      {label: "Voltar para a lista de presets", value: "preset-list"}
+    );
+
+    return items;
+  }, [state.serverRunning]);
 
   const currentConfig = state.currentConfig;
 
@@ -259,7 +298,7 @@ function App() {
 
   if (state.step === "select-preset") {
     return (
-      <Frame title="Preset">
+      <Frame title="Escolher Preset">
         <SummaryLine label="IP externo detectado" value={state.detectedIp ?? "nao disponivel"} />
         <SummaryLine label="Pasta do servidor" value={state.serverRoot ?? "nao encontrada"} />
         <Text>Escolha um preset existente ou crie um novo.</Text>
@@ -334,8 +373,8 @@ function App() {
     ];
 
     return (
-      <Frame title="Origem">
-        <Text>Escolha de onde o novo preset vai partir.</Text>
+      <Frame title="Base do Novo Preset">
+        <Text>Escolha a configuracao inicial do novo preset.</Text>
         <SelectInput
           items={baseItems}
           onSelect={(item) => {
@@ -392,43 +431,58 @@ function App() {
   if (state.step === "review") {
     return (
       <Frame title="Resumo">
-        <SummaryLine label="Preset" value={state.selectedPresetName ?? "sem nome"} />
-        <SummaryLine label="Nome do servidor" value={currentConfig.game.name ?? "sem nome"} />
-        <SummaryLine label="IP publico" value={currentConfig.publicAddress ?? "nao definido"} />
-        <SummaryLine label="Scenario" value={currentConfig.game.scenarioId ?? "nao definido"} />
-        <SummaryLine label="Mods" value={String(currentConfig.game.mods.length)} />
         <Box marginTop={1} flexDirection="column">
-          <Text>Escolha a proxima acao.</Text>
+          <Text>O que voce quer fazer agora?</Text>
           <SelectInput
-            items={[
-              {label: "Iniciar servidor agora", value: "start-now"},
-              {label: "Editar nome do servidor", value: "server-name"},
-              {label: "Editar IP publico", value: "ip"},
-              {label: "Editar scenarioId", value: "scenario"},
-              {label: "Importar mods do Reforger", value: "mods"},
-              {label: "Carregar backup do preset", value: "backup"},
-              {label: "Checar atualizacao dos mods", value: "check"},
-              {label: "Salvar preset e gerar server.json", value: "save"},
-              {label: "Gerar server.json sem salvar preset", value: "runtime"}
-            ]}
+            items={reviewMenuItems}
+            itemComponent={ReviewMenuItemComponent}
             onSelect={(item) => {
               if (item.value === "start-now") {
                 setState((current) => ({...current, step: "launching"}));
 
                 void (async () => {
                   try {
-                    const mergedConfig = materializeConfig(state.baseConfig, currentConfig);
-                    const runtimeConfigPath = await persistAndWriteRuntimeConfig(mergedConfig);
                     if (!state.serverRoot) {
                       throw new Error("Pasta do servidor nao configurada.");
                     }
-                    await launchServer(state.serverRoot, runtimeConfigPath);
+
+                    const mergedConfig = materializeConfig(state.baseConfig, currentConfig);
+                    await savePreset(state.serverRoot, state.selectedPresetName ?? "preset", mergedConfig);
+                    const presets = await listPresets(state.serverRoot);
+                    const runtimeConfigPath = await persistAndWriteRuntimeConfig(mergedConfig);
+                    const processInfo = await launchServer(state.serverRoot, runtimeConfigPath);
                     setState((current) => ({
                       ...current,
+                      presets,
                       runtimeConfigPath,
                       step: "done",
-                      doneMessage: "Servidor iniciado com o preset atual.",
-                      canReturnToReview: false
+                      doneMessage: `Preset ${getPresetLabel(state.selectedPresetName)} salvo e servidor iniciado.`,
+                      canReturnToReview: true,
+                      serverRunning: true,
+                      serverPid: processInfo.pid
+                    }));
+                  } catch (error) {
+                    setError(error);
+                  }
+                })();
+                return;
+              }
+
+              if (item.value === "stop-server") {
+                setState((current) => ({...current, step: "launching"}));
+
+                void (async () => {
+                  try {
+                    const stopped = await stopServerProcess();
+                    setState((current) => ({
+                      ...current,
+                      step: "done",
+                      doneMessage: stopped
+                        ? `Servidor ${getPresetLabel(state.selectedPresetName)} encerrado.`
+                        : "Nao existe um servidor iniciado por este app em execucao.",
+                      canReturnToReview: true,
+                      serverRunning: false,
+                      serverPid: undefined
                     }));
                   } catch (error) {
                     setError(error);
@@ -489,10 +543,40 @@ function App() {
                 return;
               }
 
+              if (item.value === "preset-list") {
+                setState((current) => ({
+                  ...current,
+                  step: "select-preset",
+                  selectedPresetName: undefined,
+                  currentConfig: undefined,
+                  presetBackups: undefined,
+                  importedMods: undefined,
+                  updateResults: [],
+                  runtimeConfigPath: undefined,
+                  doneMessage: undefined,
+                  canReturnToReview: false
+                }));
+                return;
+              }
+
               void (async () => {
                 try {
-                  await persistAndWriteRuntimeConfig(materializeConfig(state.baseConfig, currentConfig));
-                  setState((current) => ({...current, step: "launch"}));
+                  if (!state.serverRoot) {
+                    throw new Error("Pasta do servidor nao configurada.");
+                  }
+
+                  const mergedConfig = materializeConfig(state.baseConfig, currentConfig);
+                  const runtimeConfigPath = await persistAndWriteRuntimeConfig(mergedConfig);
+                  const processInfo = await launchServer(state.serverRoot, runtimeConfigPath);
+                  setState((current) => ({
+                    ...current,
+                    runtimeConfigPath,
+                    step: "done",
+                    doneMessage: `Servidor ${getPresetLabel(state.selectedPresetName)} iniciado sem salvar o preset.`,
+                    canReturnToReview: true,
+                    serverRunning: true,
+                    serverPid: processInfo.pid
+                  }));
                 } catch (error) {
                   setError(error);
                 }
@@ -544,7 +628,7 @@ function App() {
   if (state.step === "ip-custom") {
     return (
       <Frame title="IP Manual">
-        <Text>Digite o IP publico para `publicAddress`, `a2s.address` e `rcon.address`.</Text>
+        <Text>Digite o IP publico que sera usado pelo servidor, A2S e RCON.</Text>
         <Box marginTop={1}>
           <Text color="cyan">IP: </Text>
           <TextInput
@@ -599,7 +683,7 @@ function App() {
 
   if (state.step === "scenario") {
     return (
-      <Frame title="Scenario">
+      <Frame title="Missao">
         <Text>Edite o `scenarioId` completo da missao.</Text>
         <Box marginTop={1}>
           <Text color="cyan">scenarioId: </Text>
@@ -624,7 +708,7 @@ function App() {
     return (
       <Frame title="Mods">
         <SummaryLine label="Mods atuais" value={String(currentConfig.game.mods.length)} />
-        <Text>Se voce colar uma lista exportada nova, ela substitui `game.mods` do preset atual.</Text>
+        <Text>Ao importar uma nova lista, os mods atuais deste preset serao substituidos.</Text>
         <SelectInput
           items={[
             {label: "Colar nova lista de mods", value: "paste"},
@@ -658,9 +742,9 @@ function App() {
       <Frame title="Backups do Preset">
         <SummaryLine label="Preset" value={state.selectedPresetName ?? "sem nome"} />
         {state.presetBackups?.length ? (
-          <Text>Escolha um backup para carregar no preset atual.</Text>
+          <Text>Escolha um backup para restaurar neste preset.</Text>
         ) : (
-          <Text>Nenhum backup encontrado para esse preset ainda.</Text>
+          <Text>Ainda nao existe backup salvo para este preset.</Text>
         )}
         <SelectInput
           items={backupItems}
@@ -691,9 +775,9 @@ function App() {
 
   if (state.step === "mods-paste") {
     return (
-      <Frame title="Colar Mods">
-        <Text>Cole a lista exportada do Reforger. Aceita array JSON completo ou objetos separados por virgula.</Text>
-        <Text dimColor>Ctrl+S confirma a colagem.</Text>
+      <Frame title="Importar Mods do Reforger">
+        <Text>Cole a lista exportada do Reforger. Aceita um array JSON completo ou objetos separados por virgula.</Text>
+        <Text dimColor>Use Ctrl+S para confirmar a importacao.</Text>
         <PasteEditor
           value={pasteValue}
           onChange={setPasteValue}
@@ -734,7 +818,7 @@ function App() {
 
     return (
       <Frame title="Erro ao Importar Mods">
-        <Text color="red">{importError?.userMessage ?? "Falha ao importar mods."}</Text>
+        <Text color="red">{importError?.userMessage ?? "Nao foi possivel importar os mods."}</Text>
         <SummaryLine label="Etapa" value={importError?.stage ?? "desconhecida"} />
         <SummaryLine label="Detalhe tecnico" value={importError?.technicalMessage ?? "sem detalhe"} />
         <SummaryLine label="Caracteres" value={String(importError?.diagnostics.rawLength ?? 0)} />
@@ -772,7 +856,7 @@ function App() {
   if (state.step === "mods-check") {
     return (
       <Frame title="Atualizacao de Mods">
-        <Text>Fonte preferencial: lista importada. Fallback: workshop web da Bohemia.</Text>
+        <Text>Voce pode comparar com a ultima lista importada ou consultar o workshop da Bohemia.</Text>
         <SelectInput
           items={[
             ...(state.importedMods ? [{label: "Comparar com a lista importada", value: "imported"}] : []),
@@ -823,12 +907,12 @@ function App() {
 
   if (state.step === "save-preset") {
     return (
-      <Frame title="Salvar">
-        <Text>O preset selecionado sera salvo antes de gerar o `server.json`.</Text>
+      <Frame title="Salvar Preset">
+        <Text>O preset atual sera salvo no arquivo correspondente.</Text>
         <SelectInput
           items={[
             {label: `Salvar ${state.selectedPresetName ?? "preset"}.json`, value: "save"},
-            {label: "Cancelar", value: "cancel"}
+            {label: "Voltar", value: "cancel"}
           ]}
           onSelect={(item) => {
             if (item.value === "cancel") {
@@ -845,12 +929,13 @@ function App() {
                   throw new Error("Pasta do servidor nao configurada.");
                 }
                 await savePreset(state.serverRoot, state.selectedPresetName ?? "preset", mergedConfig);
-                await persistAndWriteRuntimeConfig(mergedConfig);
                 const presets = await listPresets(state.serverRoot);
                 setState((current) => ({
                   ...current,
                   presets,
-                  step: "launch"
+                  step: "done",
+                  doneMessage: `Preset ${getPresetLabel(state.selectedPresetName)} salvo com sucesso.`,
+                  canReturnToReview: true
                 }));
               } catch (error) {
                 setError(error);
@@ -864,24 +949,24 @@ function App() {
   }
 
   if (state.step === "saving") {
-    return <LoadingScreen label="Salvando preset e gerando server.json" />;
+    return <LoadingScreen label="Salvando o preset" />;
   }
 
   if (state.step === "launch") {
     return (
-      <Frame title="Abrir Servidor">
-        <SummaryLine label="server.json" value={state.runtimeConfigPath ?? "nao gerado"} />
+      <Frame title="Servidor Pronto">
+        <SummaryLine label="Arquivo gerado" value={state.runtimeConfigPath ?? "nao gerado"} />
         <SelectInput
           items={[
-            {label: "Abrir ArmaReforgerServer.exe agora", value: "launch"},
-            {label: "Finalizar sem abrir", value: "finish"}
+            {label: "Iniciar servidor agora", value: "launch"},
+            {label: "Voltar sem iniciar", value: "finish"}
           ]}
           onSelect={(item) => {
             if (item.value === "finish") {
               setState((current) => ({
                 ...current,
                 step: "done",
-                doneMessage: "server.json gerado com sucesso.",
+                doneMessage: `Configuracao do servidor gerada para o preset ${getPresetLabel(state.selectedPresetName)}.`,
                 canReturnToReview: true
               }));
               return;
@@ -899,12 +984,14 @@ function App() {
                   throw new Error("Pasta do servidor nao configurada.");
                 }
 
-                await launchServer(state.serverRoot, state.runtimeConfigPath);
+                const processInfo = await launchServer(state.serverRoot, state.runtimeConfigPath);
                 setState((current) => ({
                   ...current,
                   step: "done",
-                  doneMessage: "Servidor iniciado no terminal.",
-                  canReturnToReview: false
+                  doneMessage: `Servidor ${getPresetLabel(state.selectedPresetName)} iniciado.`,
+                  canReturnToReview: true,
+                  serverRunning: true,
+                  serverPid: processInfo.pid
                 }));
               } catch (error) {
                 setError(error);
@@ -928,6 +1015,7 @@ function App() {
         <SelectInput
           items={[
             {label: "Voltar ao resumo", value: "review"},
+            {label: "Voltar para a lista de presets", value: "presets"},
             {label: "Sair", value: "exit"}
           ]}
           onSelect={(item) => {
@@ -935,6 +1023,22 @@ function App() {
               setState((current) => ({
                 ...current,
                 step: "review",
+                doneMessage: undefined,
+                canReturnToReview: false
+              }));
+              return;
+            }
+
+            if (item.value === "presets") {
+              setState((current) => ({
+                ...current,
+                step: "select-preset",
+                selectedPresetName: undefined,
+                currentConfig: undefined,
+                presetBackups: undefined,
+                importedMods: undefined,
+                updateResults: [],
+                runtimeConfigPath: undefined,
                 doneMessage: undefined,
                 canReturnToReview: false
               }));
@@ -971,11 +1075,28 @@ function normalizePresetName(value: string): string {
   return value.trim().replace(/\.json$/i, "");
 }
 
+function getPresetLabel(value?: string): string {
+  return value?.trim() || "selecionado";
+}
+
+let sharedHeaderState: Partial<AppState> = {};
+
 function Frame(props: {title: string; children: React.ReactNode}) {
+  const summaryLines = getHeaderSummary(sharedHeaderState);
+
   return (
     <Box flexDirection="column" borderStyle="round" borderColor="cyan" padding={1}>
       <Text color="magentaBright">FCAT Server Manager</Text>
       <Text color="cyanBright">{props.title}</Text>
+      {summaryLines ? (
+        <Box marginTop={1} flexDirection="column">
+          {summaryLines.map((line) => (
+            <Text key={line} dimColor>
+              {line}
+            </Text>
+          ))}
+        </Box>
+      ) : null}
       <Box marginTop={1} flexDirection="column">
         {props.children}
       </Box>
@@ -1003,6 +1124,13 @@ function SummaryLine(props: {label: string; value: string}) {
       {props.value}
     </Text>
   );
+}
+
+function ReviewMenuItemComponent(props: {label: string; isSelected?: boolean}) {
+  const isWarning = props.label === "Encerrar servidor iniciado pelo app";
+  const color = isWarning ? "yellow" : props.isSelected ? "cyan" : undefined;
+
+  return <Text color={color}>{props.label}</Text>;
 }
 
 function Footer() {
@@ -1078,6 +1206,20 @@ function renderUpdateSummary(results: UpdateResult[]) {
       {results.length > preview.length ? <Text dimColor>...e mais {results.length - preview.length} mod(s).</Text> : null}
     </Box>
   );
+}
+
+function getHeaderSummary(state: Partial<AppState>): string[] | null {
+  if (!state.currentConfig) {
+    return null;
+  }
+
+  const config = state.currentConfig;
+
+  return [
+    `Preset: ${state.selectedPresetName ?? "sem nome"} | Status: ${state.serverRunning ? `rodando (PID ${state.serverPid ?? "?"})` : "parado"}`,
+    `Servidor: ${config.game.name ?? "sem nome"}`,
+    `IP: ${config.publicAddress ?? "nao definido"} | Missao: ${config.game.scenarioId ?? "nao definida"} | Mods: ${config.game.mods.length}`
+  ];
 }
 
 render(<App />);

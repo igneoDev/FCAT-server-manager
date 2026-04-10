@@ -66,6 +66,13 @@ export interface PresetBackup {
   presetName: string;
 }
 
+export interface ServerProcessInfo {
+  pid: number;
+  serverRoot: string;
+  configPath: string;
+  startedAt: string;
+}
+
 export type ImportModsErrorStage = "direct-parse" | "wrapped-parse" | "schema-validate";
 
 export interface ImportModsDiagnostics {

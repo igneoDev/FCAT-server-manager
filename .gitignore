@@ -8,6 +8,7 @@ app/.sea/
 app/.bundle/
 app/logs/
 app/backups/
+app/runtime/
 app/app.mjs
 app/ReforgerServerManager.exe
 app/ReforgerServerManager-sea.exe
