@@ -59,6 +59,13 @@ export interface AppSettings {
   serverRoot?: string;
 }
 
+export interface PresetBackup {
+  fileName: string;
+  label: string;
+  path: string;
+  presetName: string;
+}
+
 export type ImportModsErrorStage = "direct-parse" | "wrapped-parse" | "schema-validate";
 
 export interface ImportModsDiagnostics {

@@ -6,8 +6,11 @@ import TextInput from "ink-text-input";
 import {
   buildConfig,
   cloneConfig,
+  createPresetBackup,
   createPresetFromBase,
+  loadPresetBackup,
   listPresets,
+  listPresetBackups,
   loadBaseConfig,
   parseImportedMods,
   savePreset,
@@ -19,7 +22,7 @@ import {resolveServerRoot} from "./lib/paths.js";
 import {launchServer} from "./lib/server.js";
 import {getSettingsPath, loadSettings, saveSettings} from "./lib/settings.js";
 import {checkModsAgainstImportedList, checkModsAgainstWorkshop} from "./lib/workshop.js";
-import {ImportModsError, type AppSettings, type PresetFile, type ServerConfig, type ServerMod, type UpdateResult} from "./types.js";
+import {ImportModsError, type AppSettings, type PresetBackup, type PresetFile, type ServerConfig, type ServerMod, type UpdateResult} from "./types.js";
 
 type Step =
   | "loading"
@@ -28,6 +31,7 @@ type Step =
   | "create-preset-base"
   | "configure-server-root"
   | "review"
+  | "backup-select"
   | "server-name"
   | "ip-choice"
   | "ip-custom"
@@ -52,6 +56,7 @@ interface AppState {
   settings: AppSettings;
   selectedPresetName?: string;
   currentConfig?: ServerConfig;
+  presetBackups?: PresetBackup[];
   draftPresetName: string;
   detectedIp?: string;
   importedMods?: ServerMod[];
@@ -401,6 +406,7 @@ function App() {
               {label: "Editar IP publico", value: "ip"},
               {label: "Editar scenarioId", value: "scenario"},
               {label: "Importar mods do Reforger", value: "mods"},
+              {label: "Carregar backup do preset", value: "backup"},
               {label: "Checar atualizacao dos mods", value: "check"},
               {label: "Salvar preset e gerar server.json", value: "save"},
               {label: "Gerar server.json sem salvar preset", value: "runtime"}
@@ -450,6 +456,26 @@ function App() {
 
               if (item.value === "mods") {
                 setState((current) => ({...current, step: "mods-decision"}));
+                return;
+              }
+
+              if (item.value === "backup") {
+                void (async () => {
+                  try {
+                    if (!state.selectedPresetName) {
+                      throw new Error("Selecione ou salve um preset antes de carregar backups.");
+                    }
+
+                    const presetBackups = await listPresetBackups(state.selectedPresetName);
+                    setState((current) => ({
+                      ...current,
+                      step: "backup-select",
+                      presetBackups
+                    }));
+                  } catch (error) {
+                    setError(error);
+                  }
+                })();
                 return;
               }
 
@@ -619,6 +645,50 @@ function App() {
     );
   }
 
+  if (state.step === "backup-select") {
+    const backupItems = [
+      ...((state.presetBackups ?? []).map((backup) => ({
+        label: backup.label,
+        value: backup.path
+      }))),
+      {label: "Voltar", value: "__back__"}
+    ];
+
+    return (
+      <Frame title="Backups do Preset">
+        <SummaryLine label="Preset" value={state.selectedPresetName ?? "sem nome"} />
+        {state.presetBackups?.length ? (
+          <Text>Escolha um backup para carregar no preset atual.</Text>
+        ) : (
+          <Text>Nenhum backup encontrado para esse preset ainda.</Text>
+        )}
+        <SelectInput
+          items={backupItems}
+          onSelect={(item) => {
+            if (item.value === "__back__") {
+              setState((current) => ({...current, step: "review"}));
+              return;
+            }
+
+            void (async () => {
+              try {
+                const backupConfig = await loadPresetBackup(item.value);
+                setState((current) => ({
+                  ...current,
+                  step: "review",
+                  currentConfig: backupConfig
+                }));
+              } catch (error) {
+                setError(error);
+              }
+            })();
+          }}
+        />
+        <Footer />
+      </Frame>
+    );
+  }
+
   if (state.step === "mods-paste") {
     return (
       <Frame title="Colar Mods">
@@ -630,20 +700,25 @@ function App() {
           onSubmit={() => {
             void (async () => {
               try {
-              const importedMods = parseImportedMods(pasteValue);
-              const diff = checkModsAgainstImportedList(currentConfig.game.mods, importedMods);
+                const importedMods = parseImportedMods(pasteValue);
+                const diff = checkModsAgainstImportedList(currentConfig.game.mods, importedMods);
 
-              updateConfig((config) => {
-                config.game.mods = importedMods;
-              });
+                if (state.selectedPresetName) {
+                  const backupConfig = materializeConfig(state.baseConfig, currentConfig);
+                  await createPresetBackup(state.selectedPresetName, backupConfig, "mods-import");
+                }
 
-              setState((current) => ({
-                ...current,
-                step: "review",
-                importedMods,
-                updateResults: diff
-              }));
-              setPasteValue("");
+                updateConfig((config) => {
+                  config.game.mods = importedMods;
+                });
+
+                setState((current) => ({
+                  ...current,
+                  step: "review",
+                  importedMods,
+                  updateResults: diff
+                }));
+                setPasteValue("");
               } catch (error) {
                 await handleImportError(error, pasteValue);
               }

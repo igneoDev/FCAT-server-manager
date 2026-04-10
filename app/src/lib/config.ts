@@ -1,11 +1,12 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import {z} from "zod";
-import {ImportModsError, type ImportModsDiagnostics, type PresetFile, type ServerConfig, type ServerMod} from "../types.js";
+import {ImportModsError, type ImportModsDiagnostics, type PresetBackup, type PresetFile, type ServerConfig, type ServerMod} from "../types.js";
 import {getAppRoot} from "./paths.js";
 
 const appRoot = getAppRoot();
 const baseConfigPath = path.resolve(appRoot, "data", "base.json");
+const backupsRoot = path.resolve(appRoot, "backups");
 
 const modSchema = z.object({
   modId: z.string(),
@@ -64,6 +65,44 @@ export async function writeRuntimeConfig(serverRoot: string, config: ServerConfi
   const outputPath = path.resolve(serverRoot, "server.json");
   await fs.writeFile(outputPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
   return outputPath;
+}
+
+export async function createPresetBackup(presetName: string, config: ServerConfig, reason = "mods-import"): Promise<string> {
+  const backupDir = path.resolve(backupsRoot, sanitizeBackupSegment(presetName));
+  await fs.mkdir(backupDir, {recursive: true});
+
+  const timestamp = createBackupTimestamp();
+  const fileName = `${timestamp}-${sanitizeBackupSegment(reason)}.json`;
+  const outputPath = path.resolve(backupDir, fileName);
+  await fs.writeFile(outputPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+  return outputPath;
+}
+
+export async function listPresetBackups(presetName: string): Promise<PresetBackup[]> {
+  const backupDir = path.resolve(backupsRoot, sanitizeBackupSegment(presetName));
+
+  try {
+    const entries = await fs.readdir(backupDir, {withFileTypes: true});
+    return entries
+      .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
+      .map((entry) => {
+        const filePath = path.resolve(backupDir, entry.name);
+        return {
+          fileName: entry.name,
+          label: formatBackupLabel(entry.name),
+          path: filePath,
+          presetName
+        } satisfies PresetBackup;
+      })
+      .sort((left, right) => right.fileName.localeCompare(left.fileName));
+  } catch {
+    return [];
+  }
+}
+
+export async function loadPresetBackup(backupPath: string): Promise<ServerConfig> {
+  const raw = await fs.readFile(backupPath, "utf8");
+  return serverConfigSchema.parse(JSON.parse(raw));
 }
 
 export function buildConfig(baseConfig: ServerConfig, overrideConfig: ServerConfig): ServerConfig {
@@ -280,4 +319,32 @@ function deepMerge<T>(baseValue: T, overrideValue: T): T {
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function sanitizeBackupSegment(value: string): string {
+  return value.replace(/[<>:"/\\|?*\u0000-\u001F]/g, "-").replace(/\s+/g, "-");
+}
+
+function createBackupTimestamp(): string {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  const hours = String(now.getHours()).padStart(2, "0");
+  const minutes = String(now.getMinutes()).padStart(2, "0");
+  const seconds = String(now.getSeconds()).padStart(2, "0");
+  return `${year}${month}${day}-${hours}${minutes}${seconds}`;
+}
+
+function formatBackupLabel(fileName: string): string {
+  const match = fileName.match(/^(\d{8})-(\d{6})-(.+)\.json$/);
+
+  if (!match) {
+    return fileName;
+  }
+
+  const [, datePart, timePart, reason] = match;
+  const formattedDate = `${datePart.slice(6, 8)}/${datePart.slice(4, 6)}/${datePart.slice(0, 4)}`;
+  const formattedTime = `${timePart.slice(0, 2)}:${timePart.slice(2, 4)}:${timePart.slice(4, 6)}`;
+  return `${formattedDate} ${formattedTime} - ${reason}`;
 }
